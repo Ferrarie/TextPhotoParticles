@@ -1,0 +1,310 @@
+using System;
+using System.Collections.Generic;
+using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
+using System.Text;
+using UnityEngine;
+
+/// <summary>
+/// UDP接收 发送
+/// </summary>
+public class SocketManager : SimpleSingleton<SocketManager>, IDisposable
+{
+    private Socket udpSocket;
+
+    /// <summary> 本地end point  </summary>
+    public EndPoint LocalEndPoint { get; protected set; }
+
+    /// <summary> 本地监听端口  </summary>
+    public int LocalPort { get; protected set; }
+
+    /// <summary> 发送目标end point </summary>
+    public EndPoint TargetEndPoint { get; protected set; }
+
+    /// <summary> 发送目标Ipv4 </summary>
+    public string TargetIPV4 { get; protected set; }
+
+    /// <summary> 发送目标端口 </summary>
+    public int TargetPort { get; protected set; }
+
+    private byte[] recvBuffer = null;
+
+    #region Init
+
+    /// <summary> 本地监听 </summary>
+    /// <param name="listenPort"></param>
+    /// <param name="bufferLen">缓冲区大小</param>
+    public void Init(int listenPort, int bufferLen = 2048)
+    {
+        recvBuffer = new byte[bufferLen];
+
+        //本地端口
+        bool initLocal = InitLocal(listenPort, out var localResult);
+        if (initLocal)
+        {
+            this.LocalPort = listenPort;
+            this.LocalEndPoint = localResult;
+        }
+
+        //socket
+        if (initLocal)
+        {
+            udpSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            udpSocket.Bind(LocalEndPoint);
+            BeginReceive();
+            Debug.Log($"SocketManger    UDP监听端:{LocalEndPoint.ToString()}");
+        }
+    }
+
+    /// <summary> 本地监听 + 发送 </summary>
+    /// <param name="listenPort"></param>
+    /// <param name="sendIp"></param>
+    /// <param name="sendPort"></param>
+    public void Init(int listenPort, string sendIp, int sendPort)
+    {
+        //发送端
+        bool initSend = InitSend(sendIp, sendPort, out var sendResult);
+        if (initSend)
+        {
+            this.TargetIPV4 = sendIp;
+            this.TargetPort = sendPort;
+            this.TargetEndPoint = sendResult;
+        }
+
+        //本地端口
+        bool initLocal = InitLocal(listenPort, out var localResult);
+        if (initLocal)
+        {
+            this.LocalPort = listenPort;
+            this.LocalEndPoint = localResult;
+        }
+
+        //socket
+        if (initLocal && initSend)
+        {
+            udpSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            udpSocket.Bind(LocalEndPoint);
+            BeginReceive();
+            Debug.Log($"SocketManger    UDP监听端:{LocalEndPoint.ToString()}, 发送端:{TargetEndPoint.ToString()}");
+        }
+    }
+
+    private bool InitSend(string sendIP_str, int sendPort, out IPEndPoint result)
+    {
+        bool ipCheck = IsIPValid(sendIP_str, sendPort, out IPAddress sendIp);
+        if (ipCheck == false)
+        {
+            result = null;
+            Debug.LogError($"发送IP地址格式不正确：{sendIP_str}:{sendPort}");
+            return false;
+        }
+
+        result = new IPEndPoint(sendIp, sendPort);
+        return true;
+    }
+
+    private bool InitLocal(int listenPort, out IPEndPoint result)
+    {
+        try
+        {
+            result = new IPEndPoint(IPAddress.Any, listenPort);
+            return true;
+        }
+        catch (SocketException ex)
+        {
+            Debug.LogError($"SocketManager   初始化本地信息失败:{ex}");
+            result = null;
+            return false;
+        }
+    }
+
+    #endregion
+
+    /// <summary> 查询本地的某个端口是否被绑定 </summary>
+    /// <param name="port"></param>
+    /// <returns></returns>
+    public static bool IsPortBound(int port)
+    {
+        IPGlobalProperties properties = IPGlobalProperties.GetIPGlobalProperties();
+        IPEndPoint[] endpoints = properties.GetActiveTcpListeners();
+        foreach (IPEndPoint endpoint in endpoints)
+        {
+            if (endpoint.Port == port)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary> 检查IP和端口合法性 </summary>
+    /// <param name="ipStr"></param>
+    /// <param name="port"></param>
+    /// <param name="result"></param>
+    /// <returns></returns>
+    public static bool IsIPValid(string ipStr, int port, out IPAddress result)
+    {
+        if (IsPortValid(port) == false)
+        {
+            result = null;
+            return false;
+        }
+
+        if (string.IsNullOrEmpty(ipStr))
+        {
+            result = null;
+            return false;
+        }
+
+        bool isIp = IPAddress.TryParse(ipStr, out result);
+        if (isIp == false)
+        {
+            result = null;
+            return false;
+        }
+
+        return true;
+    }
+
+    public static bool IsPortValid(int port)
+    {
+        if (port < 0 || port > 65535)
+        {
+            // Debug.LogError("Invalid port number. Port number should be between 0 and 65535.");
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary> 获取本机所有IPv4 </summary>
+    /// <returns></returns>
+    public IReadOnlyList<IPAddress> GetAllIPV4()
+    {
+        var allAddress = Dns.GetHostAddresses(Dns.GetHostName());
+        List<IPAddress> ipv4 = new List<IPAddress>();
+        for (int i = 0, length = allAddress.Length; i < length; i++)
+        {
+            if (allAddress[i].AddressFamily == AddressFamily.InterNetwork)
+            {
+                ipv4.Add(allAddress[i]);
+            }
+        }
+
+        return allAddress;
+    }
+
+    #region Send
+
+    public void Send(string message)
+    {
+        var data = Encoding.UTF8.GetBytes(message);
+        Send(data);
+    }
+
+    public void Send(byte[] data)
+    {
+        try
+        {
+            if (udpSocket != null && udpSocket.Connected)
+            {
+                int sendInt = udpSocket.SendTo(data, TargetEndPoint);
+#if UNITY_EDITOR
+                string str = Encoding.UTF8.GetString(data);
+                Debug.Log($"发送:{str} \n长度:{sendInt}");
+#endif
+            }
+            else
+            {
+                Debug.LogError("SocketManager    发送失败：socket未连接");
+            }
+        }
+        catch (Exception e)
+        {
+            Debug.LogError("SocketManager    发送失败：" + e);
+        }
+    }
+
+    #endregion
+
+    #region Receive
+
+    private void BeginReceive()
+    {
+        try
+        {
+            // 开始异步接收数据
+            udpSocket.BeginReceive(recvBuffer, 0, recvBuffer.Length, SocketFlags.None, ReceiveCallback, recvBuffer);
+        }
+        catch (SocketException ex)
+        {
+            Debug.LogError("Socket exception: " + ex);
+        }
+    }
+
+    private void ReceiveCallback(IAsyncResult result)
+    {
+        try
+        {
+            // 结束异步接收
+            int bytesRead = udpSocket.EndReceive(result);
+
+            // 处理接收到的数据
+            if (bytesRead > 0)
+            {
+                byte[] receivedData = (byte[])result.AsyncState;
+                MainThreadDispatcher.Instance.Enqueue(UnityReceive, receivedData);
+
+                // 继续异步接收数据
+                BeginReceive();
+            }
+        }
+        catch (SocketException ex)
+        {
+            Debug.LogError("Socket exception: " + ex);
+        }
+    }
+
+
+    public event Action<byte[]> OnUnityReceive = null;
+
+    /// <summary>
+    /// 这里写Unity主线程线管处理
+    /// </summary>
+    /// <param name="data"></param>
+    private void UnityReceive(byte[] data)
+    {
+        OnUnityReceive?.Invoke(data);
+    }
+
+    #endregion
+
+    #region Dispose
+
+    public void Dispose()
+    {
+        try
+        {
+            // 关闭链接
+            if (udpSocket != null && udpSocket.Connected)
+            {
+                udpSocket.Shutdown(SocketShutdown.Both);
+                udpSocket.Close();
+            }
+        }
+        catch (Exception e)
+        {
+            Debug.LogError("SocketManager    释放UDP socket失败！" + e);
+        }
+        finally
+        {
+            udpSocket = null;
+        }
+
+        Debug.Log("SocketManager    释放socket！");
+    }
+
+    #endregion
+}
